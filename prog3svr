@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+import sys, socket, threading
+
+DEFINE_MAX = 2
+
+###################################################################
+# Connected client instance
+#
+# Including all connected clients and check there registration,
+# and carries out all commands received from them.
+#
+# @members:
+#     clients      static list which involves all connected clients
+#     registered   static counter, number of registered clients
+#
+#     ip           ip address of client
+#     port         port number
+#     csocket      socket object
+#     isregistered 1 if client is registered, 0 if not
+#
+###################################################################
+class ClientThread(threading.Thread):
+
+    def __init__(self,ip,port,clientsocket):
+        threading.Thread.__init__(self)
+        self.ip = ip
+        self.port = port
+        self.csocket = clientsocket
+        self.isregistered = 0
+
+        if ClientThread.registered >= DEFINE_MAX:
+            print("Client (%d): Database Full. Disconnecting User."%(self.csocket.fileno()))
+            print("Client (%d): Error: Too Many Clients Connected..." %(self.csocket.fileno()))
+            self.send_reply(self.csocket, "Too Many Users. Disconnecting User.\r\n")
+            self.csocket.close()
+        else:
+            lock.acquire()
+            ClientThread.clients.append(self)
+            lock.release()
+
+            self.print_server_msg("Connection Accepted")
+            self.print_server_msg("Connection Handler Assigned")
+    
+    def print_server_msg(self, msg):
+        clieID = ClientThread.clients.index(self)
+        print("Client (%d): %s" %(ClientThread.clients[clieID].csocket.fileno(), msg))
+        
+    def send_reply(self, socket, msg):
+        socket.send(msg.encode('utf-8'))
+    
+    # Client can send 5 possible commands: JOIN, LIST, MESG, BCST, QUIT
+    # LIST, MESG, BCST are only usable when client is registered.
+    #
+    # These are handled by these functions.
+    #
+    # JOIN <client_username>
+    def join_client(self, msg):
+        # command validation check
+        name = msg[(msg.find("OIN") + 4):len(msg)]
+
+        if name == "":
+            self.send_reply(self.csocket, "usage:  JOIN <username>\r\n")
+            return -1
+                  
+        # check if user is already registered
+        if self.isregistered == 1:
+           self.print_server_msg("User Already Registered. Discarding JOIN")
+           self.print_server_msg("LEAVE")
+           self.send_reply(self.csocket, "User Already Registered: Username (%s), FD (%d)\r\n" %(self.name, self.csocket.fileno()))
+           return 0
+
+        # number of user cannot exceed 10   
+        if ClientThread.registered >= DEFINE_MAX:
+            self.print_server_msg("Database Full. Disconnecting User.")
+            self.print_server_msg("Error: Too Many Clients Connected...")
+            self.send_reply(self.csocket, "Too Many Users. Disconnecting User.\r\n")
+            return -1
+        
+        # check if there is any same name user
+        for user in ClientThread.clients:
+            if user.isregistered == 1 and user.name == name:
+                self.print_server_msg("LEAVE")
+                return -1
+
+        self.isregistered = 1
+        self.name = name
+        lock.acquire()
+        ClientThread.registered = ClientThread.registered + 1
+        lock.release()
+        self.print_server_msg("JOIN %s" %(name))
+        self.send_reply(self.csocket, "JOIN %s Request Accepted\r\n" %(name))
+        return 0
+
+    # LIST
+    def list_clients(self):
+        self.print_server_msg("LIST")
+        # command validation check
+        if self.isregistered == 0:
+            print("Unable to Locate Client (%d) in Database. Discarding LIST" %(ClientThread.clients[ClientThread.clients.index(self)].csocket.fileno()))
+            self.send_reply(self.csocket, "Unregistered User. Use \"JOIN <username>\" to Register. \r\n")
+            return
+        else:
+            self.send_reply(self.csocket, "USERNAME(%d users)     FD\r\n" %(ClientThread.registered))
+            self.send_reply(self.csocket, "----------------------------\r\n")
+            for user in ClientThread.clients:
+                if user.isregistered == 1:
+                    self.send_reply(self.csocket, "%s          %d\r\n" %(user.name, user.csocket.fileno()))
+            self.send_reply(self.csocket, "----------------------------\r\n")
+            return
+    
+    # MESG <peer_username> <message>
+    def send_message_to_peer(self, msg):
+        if self.isregistered == 0:
+            print("Unable to Locate Client (%d) in Database. Discarding MESG" %(ClientThread.clients[ClientThread.clients.index(self)].csocket.fileno()))
+            self.send_reply(self.csocket, "Unregistered User. Use \"JOIN <username>\" to Register.\r\n")
+            return
+        # command validation check
+        elif len(msg.split(" ")) == 1:
+            self.send_reply(self.csocket, "usage:  MESG <peername> <message>\r\n")
+            return
+        else:
+            name = msg.split(" ")[1]
+            msgContent = msg[(msg.find(name) + len(name) + 1):len(msg)]
+            for user in ClientThread.clients:
+                if user.name == name:
+                    self.send_reply(user.csocket, "From %s: %s\r\n" %(self.name, msgContent))
+                    return
+            self.send_reply(self.csocket, "No such user.\r\n")
+    
+    # BCST <message>
+    def send_broadcast(self, msg):
+        if self.isregistered == 0:
+            print("Unable to Locate Client (%d) in Database. Discarding BCST" %(ClientThread.clients[ClientThread.clients.index(self)].csocket.fileno()))
+            self.send_reply(self.csocket, "Unregistered User. Use \"JOIN <username>\" to Register.\r\n")
+            return
+        # command validation check
+        elif len(msg.split(" ")) == 1:
+            self.send_reply(self.csocket, "usage:  BCST <message>\r\n")
+            return
+        else:
+            command = msg.split(" ")[0]
+            msgContent = msg[(msg.find(command) + len(command) + 1):len(msg)]
+            for user in ClientThread.clients:
+                if user.isregistered == 1 and user.name != self.name:
+                    self.send_reply(user.csocket, "From %s: %s\r\n" %(self.name, msgContent))
+            return
+    
+    # QUIT
+    def quit_session(self):
+        self.print_server_msg("QUIT")
+        if self.isregistered == 0:
+            print("Unable to Locate Client (%d) in Database. Disconnecting User" %(ClientThread.clients[ClientThread.clients.index(self)].csocket.fileno()))
+        return -1
+
+    # client command parser
+    def parse_client_msg(self, msg):
+        # chop '\r\n' in msg
+        msg = msg[0:(len(msg)-2)]
+
+        if msg.find("JOIN") != -1 or msg.find("OIN") != -1:
+            return self.join_client(msg)
+        elif msg.find("LIST") != -1:
+            self.list_clients()
+            return
+        elif msg.find("MESG") != -1:
+            self.send_message_to_peer(msg)
+            return
+        elif msg.find("BCST") != -1:
+            self.send_broadcast(msg)
+            return
+        elif msg.find("QUIT") != -1:
+            return self.quit_session()
+        else:
+            self.print_server_msg("Unrecognizable Message. Discarding UNKNOWN Message.")
+            self.send_reply(self.csocket, "Unknown Message. Discarding UNKNOWN Message.\r\n")
+            return
+
+    def run(self):
+        if self.csocket.fileno() == -1:
+            return
+        
+        clientMsg = "dummydata"
+        sss = []
+	
+        while len(clientMsg):
+            try:
+                clientMsg = self.csocket.recv(128)
+            except socket.error:
+                continue
+            
+            clientMsg = clientMsg.decode('utf-8', 'backslashreplace')
+
+            sss.append(clientMsg)
+            if clientMsg.endswith('\r\n'):
+                clientMsg = ''.join(sss)
+                sss = []
+                if self.parse_client_msg(clientMsg) == -1:
+                    break
+
+        # If client sends 'QUIT' command, or terminates by itself,
+        # close socket and remove that from client list.
+        self.print_server_msg("Disconnecting User.")
+
+        lock.acquire()
+        ClientThread.clients.remove(self)
+        if self.isregistered == 1:
+            ClientThread.registered = ClientThread.registered - 1
+        lock.release()
+
+        self.csocket.close()
+        self.isregistered = 0
+        
+        
+def get_port(argv):
+    if len(argv) < 2:
+        print("usage: ", argv[0], " <svr_port> ")
+        sys.exit()
+    port = int(argv[1])
+    if port > 65535 or port < 1024:
+        print ("svr_port must be between 1024 and 65535")
+        sys.exit()
+    return port
+
+# Main routine
+def main():
+    host = "0.0.0.0"
+    port = get_port(sys.argv)
+
+    tcpsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    tcpsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    tcpsock.bind((host,port))
+    tcpsock.listen(4)
+
+    print ("Waiting for Incomming Connections...")
+
+    # connected clients list
+    ClientThread.clients = []
+    # number of registered clients
+    ClientThread.registered = 0
+
+    while True:
+        (clientsock, (ip, port)) = tcpsock.accept()
+
+        #pass clientsock to the ClientThread thread object being created
+        newthread = ClientThread(ip, port, clientsock)
+        newthread.start()
+
+lock = threading.Lock()
+
+try:
+    main()
+except KeyboardInterrupt:
+    print("Interrupted")
+    sys.exit(0)
+
